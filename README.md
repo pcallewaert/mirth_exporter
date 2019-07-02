@@ -4,7 +4,7 @@ Export [Mirth Connect](https://en.wikipedia.org/wiki/Mirth_Connect) channel
 statistics to [Prometheus](https://prometheus.io).
 
 Metrics are retreived using the Mirth Connect CLI. This has only been tested
-with Mirth Connect 3.3.2, but it should work with any 3.x version.
+with Mirth Connect 3.3.2 & Mirth Connect 3.5.1, but it should work with any 3.x version. 
 
 To run it:
 
@@ -28,7 +28,6 @@ To run it:
 
 | Flag | Description | Default |
 | ---- | ----------- | ------- |
-| log.level | Logging level | `info` |
 | mccli.config-path | Path to properties file for Mirth Connect CLI | `./mirth-cli-config.properties` |
 | mccli.jar-path | Path to jar file for Mirth Connect CLI | `./mirth-cli-launcher.jar` |
 | web.listen-address | Address to listen on for telemetry | `:9140` |
