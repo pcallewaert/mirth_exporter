@@ -6,10 +6,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -19,7 +21,8 @@ import (
 const namespace = "mirth"
 
 var (
-	up = prometheus.NewDesc(
+	logger log.Logger
+	up     = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "up"),
 		"Was the last Mirth query successful.",
 		nil, nil,
@@ -62,13 +65,12 @@ var (
 )
 
 type Exporter struct {
-	jarPath, configPath string
+	mcCommandPath string
 }
 
-func NewExporter(mccliJarPath, mccliConfigPath string) *Exporter {
+func NewExporter(mcCommandPath string) *Exporter {
 	return &Exporter{
-		jarPath:    mccliJarPath,
-		configPath: mccliConfigPath,
+		mcCommandPath: mcCommandPath,
 	}
 }
 
@@ -89,7 +91,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			up, prometheus.GaugeValue, 0,
 		)
-		log.Error(err)
+		logger.Error(err)
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(
@@ -100,33 +102,32 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (e *Exporter) fetchStatLines() ([]string, error) {
-	cmd := exec.Command("java", "-jar", e.jarPath, "-c", e.configPath)
-	stdin, err := cmd.StdinPipe()
+	logger.Debug("Excuting fetchStatLines")
+	// First create a query file to load in Mirth Connect CLI
+	// It's not the best way by creating and removing the file all the time, but this way we are sure the content in the query file is correct (and no malicious queries can be executed)
+	file, err := ioutil.TempFile(os.TempDir(), "mirth_exporter")
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	defer file.Close()
+	defer os.Remove(file.Name())
+	file.WriteString("status\nchannel stats\n")
+	file.Sync()
+	logger.Debugf("Using %s as query file", file.Name())
+	cmd := exec.Command(e.mcCommandPath, "-s", file.Name())
+	timer := time.AfterFunc(10*time.Second, func() {
+		cmd.Process.Kill()
+	})
+	stdout, err := cmd.Output()
+	timer.Stop()
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	fmt.Fprintln(stdin, "status")
-	fmt.Fprintln(stdin, "channel stats")
-	stdin.Close()
-	bytesOut, err := ioutil.ReadAll(stdout)
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Wait(); err != nil {
-		return nil, err
-	}
-	lines := strings.Split(string(bytesOut), "\n")
+	lines := strings.Split(string(stdout), "\n")
 	if len(lines) < 3 {
-		return nil, fmt.Errorf("Unexpected output: %s", string(bytesOut))
+		return nil, fmt.Errorf("Unexpected output: %s", string(stdout))
 	}
-	log.Debug(string(bytesOut))
+	logger.Debug(string(stdout))
 	return lines, nil
 }
 
@@ -186,17 +187,16 @@ func main() {
 			"Address to listen on for telemetry")
 		metricsPath = flag.String("web.telemetry-path", "/metrics",
 			"Path under which to expose metrics")
-		mccliConfigPath = flag.String("mccli.config-path", "./mirth-cli-config.properties",
-			"Path to properties file for Mirth Connect CLI")
-		mccliJarPath = flag.String("mccli.jar-path", "./mirth-cli-launcher.jar",
-			"Path to jar file for Mirth Connect CLI")
+		mccliPath = flag.String("mccli.path", "./mccommand",
+			"Path to mccommand for Mirth Connect CLI")
+		loglevel = flag.String("loglevel", "INFO", "Loglevel: DEBUG, INFO, ERROR, WARN")
 	)
 	flag.Parse()
-
-	exporter := NewExporter(*mccliJarPath, *mccliConfigPath)
+	logger = log.NewLogger(os.Stdout)
+	logger.SetLevel(*loglevel)
+	exporter := NewExporter(*mccliPath)
 	prometheus.MustRegister(exporter)
-
-	log.Infof("Starting server: %s", *listenAddress)
+	logger.Infof("Starting server: %s", *listenAddress)
 	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
@@ -207,5 +207,5 @@ func main() {
              </body>
              </html>`))
 	})
-	log.Fatal(http.ListenAndServe(*listenAddress, nil))
+	logger.Fatal(http.ListenAndServe(*listenAddress, nil))
 }
